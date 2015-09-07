@@ -15,20 +15,20 @@ import org.elasticsearch.spark.sql._
 
 object NgasImport {
 
-  val accessRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*(?<=client_address=\(\')(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\'\,\s+(\d+).*(?<=file\_id=)(\d+)\_(\d+).*(?<=host=)([^\s]+).*(?<=Thread\-)(\d+)""".r    
+  val accessRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*file\_id=(\d+)\_(\d+).*host=([^\s]+).*Thread\-(\d+)""".r    
 
-  val threadRegex = """(?<=Thread\-)(\d+)""".r
-  val sizeRegex = """(?<=Size:\s)(\d+).*(?<=Thread\-)(\d+)""".r
+  val threadRegex = """.*Thread\-(\d+)""".r
+  val sizeRegex = """.*Size:\s(\d+).*Thread\-(\d+)""".r
 
   // Want to know the transfer rate of in-progress transfers and for which thread.
  // val transferRateRegex = """(?<=Transfer rate:)(\d+\.\d[MGKBmgkb]{2}\/s).*(?<=Thread-)(\d+)""".r
 
-  val ipRegex = """(?<=HTTP reply sent to: \(\')([^\']+).*(?<=Thread-)(\d+)""".r
+  val ipRegex = """.*HTTP reply sent to: \(\'([^\']+).*Thread\-(\d+)""".r
 
       case class Access(date: String, ip: String, obsId: Int, obsDate: String, host: String, thread: Int)
-      case class IpThread(thread_1: Int, ip: String)
-      case class SizeThread(thread_2: Int, size: Int)
-      case class Thread(thread_3: Int)
+      case class IpThread(thread: Int, ip: String)
+      case class SizeThread(thread: Int, size: Int)
+      case class Thread(thread: Int)
 
     def main(args: Array[String]) = {
       val logFile = "file:///home/damien/project/ngaslogs-fe1/*.nglog"
@@ -75,16 +75,15 @@ object NgasImport {
 
       val accessesClean = accesses
         // remove redirects
-        .join(redirects, $"thread" === $"thread_3", "left_outer")
+        .join(redirects, accesses("thread") === redirects("thread"), "left_outer")
         // ensure threads with success messages
-        .join(dataReplys, $"thread" === $"thread_2", "inner")
-        .saveToEs("spark/dftest")
+        .join(dataReplys, accesses("thread") === dataReplys("thread"), "inner")
+        .saveToEs("spark/dftest", Map("es.mapping.id" -> "date"))
 
       sc.stop()
     }
     
     def extractThread(line: String): Thread = {
-      println(line)
       threadRegex.findFirstIn(line) match {
         case Some(threadRegex(thread)) => new Thread(thread.toInt)
       }
@@ -93,6 +92,7 @@ object NgasImport {
     def extractAccess(line: String): Access = {
       accessRegex.findFirstIn(line) match {
         case Some(accessRegex(date, ip, obsId, obsDate, host, thread)) => new Access(date, ip, obsId.toInt, obsDate, host, thread.toInt)
+        case Some(accessRegex(date, obsId, obsDate, host, thread)) => new Access(date, "", obsId.toInt, obsDate, host, thread.toInt)
       }
     }
 
