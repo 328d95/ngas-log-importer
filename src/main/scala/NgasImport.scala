@@ -1,8 +1,8 @@
 /* NgasImport.scala */
 // Spark
-import org.apache.spark.SparkContext
+import org.apache.spark.{SparkContext, SparkConf}
 import org.apache.spark.SparkContext._
-import org.apache.spark.SparkConf
+import org.apache.spark.storage.StorageLevel
 
 // DataFrames
 import org.apache.spark.sql.SQLContext
@@ -15,98 +15,124 @@ import org.elasticsearch.spark.sql._
 
 object NgasImport {
 
-  val accessRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*file\_id=(\d+)\_(\d+).*host=([^\s]+).*Thread\-(\d+)""".r    
+  val accessRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*file\_id=((\d+)\_(\d+)[^\|]+).*host=([^\s]+).*Thread\-(\d+)""".r    
 
   val threadRegex = """.*Thread\-(\d+)""".r
   val sizeRegex = """.*Size:\s(\d+).*Thread\-(\d+)""".r
+  val ingestRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*host=([^\s]+).*content-length=(\d+).*filename="((\d+)_(\d+)[^\"]+).*Thread\-(\d+)""".r
 
   // Want to know the transfer rate of in-progress transfers and for which thread.
  // val transferRateRegex = """(?<=Transfer rate:)(\d+\.\d[MGKBmgkb]{2}\/s).*(?<=Thread-)(\d+)""".r
 
   val ipRegex = """.*HTTP reply sent to: \(\'([^\']+).*Thread\-(\d+)""".r
 
-      case class Access(date: String, ip: String, obsId: Int, obsDate: String, host: String, thread: Int)
-      case class IpThread(thread: Int, ip: String)
-      case class SizeThread(thread: Int, size: Int)
-      case class Thread(thread: Int)
+      case class Access(date: String, ip: String, file: String, obsId: Long, obsDate: String, host: String, thread: Long)
+      case class IpThread(ip: String, thread: Long)
+      case class SizeThread(size: Long, thread: Long)
+      case class Thread(thread: Long)
+      case class Ingest(date: String, ip: String, host: String, size: Long, file: String, obsId: Long, obsDate: String, thread: Long)
 
     def main(args: Array[String]) = {
       val logFile = "file:///home/damien/project/ngaslogs-fe1/*.nglog"
       val conf = new SparkConf()
         .setMaster("local[4]")
         .setAppName("NGAS Log Importer")
-        .set("spark.executor.memory", "2g")
-        .set("es.index.auto.create", "true")
+
       val sc = new SparkContext(conf)
 
       val sqlContext = new SQLContext(sc)
       import sqlContext.implicits._
 
-      // setup data types
+      val lines = sc.textFile(logFile)
 
-      // retrieve
-      val accesses = sc.textFile(logFile)
-        .filter(line => line.contains("|RETRIEVE?"))
-        .map(line => extractAccess(line))
+      val ingests = lines
+        .filter(line => line.contains("path=|QARCHIVE|"))
+        .map(line => extractIngest(line))
         .toDF()
 
-      val archives = sc.textFile(logFile)
+      val accesses = lines
+        .filter(line => line.contains("path=|RETRIEVE?"))
+        .map(line => extractAccess(line))
+        .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+      val archives = lines 
         .filter(line => line.contains("Archive Push/Pull"))
         .map(line => extractSize(line))
         .toDF()
 
       // get access thread numbers
-      val httpReplys = sc.textFile(logFile)
+      val httpReplys = lines
         .filter(line => line.contains("HTTP reply sent to:"))
         .map(line => extractIp(line))
         .toDF()
 
       // get redirect and internal call thread numbers
-      val redirects = sc.textFile(logFile) 
+      val redirects = lines 
         .filter(line => 
           (line.contains("NGAMS_INFO_REDIRECT") || line.contains("Successfully handled Archive")))
         .map(line => extractThread(line))
         .toDF()
 
-      val dataReplys = sc.textFile(logFile)
+      val dataReplys = lines
         .filter(line => line.contains("Sending data back to requestor"))
         .map(line => extractSize(line))
         .toDF()
 
       val accessesClean = accesses
+        // remove failed matches
+        .filter(accesses("thread") > 0)
         // remove redirects
         .join(redirects, accesses("thread") === redirects("thread"), "left_outer")
         // ensure threads with success messages
         .join(dataReplys, accesses("thread") === dataReplys("thread"), "inner")
-        .saveToEs("spark/dftest", Map("es.mapping.id" -> "date"))
+        .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
+
+      // TODO what else do I need to do to ensure ingests are correct?
+      val ingestsClean = ingests
+        .filter(ingests("thread") > 0)
+        .saveToEs("ngas/ingest", Map("es.mapping.id" -> "date"))
 
       sc.stop()
     }
     
     def extractThread(line: String): Thread = {
       threadRegex.findFirstIn(line) match {
-        case Some(threadRegex(thread)) => new Thread(thread.toInt)
+        case Some(threadRegex(thread)) => Thread(thread.toLong)
+        case _ => Thread(0)
       }
     }
 
     def extractAccess(line: String): Access = {
       accessRegex.findFirstIn(line) match {
-        case Some(accessRegex(date, ip, obsId, obsDate, host, thread)) => new Access(date, ip, obsId.toInt, obsDate, host, thread.toInt)
-        case Some(accessRegex(date, obsId, obsDate, host, thread)) => new Access(date, "", obsId.toInt, obsDate, host, thread.toInt)
+        case Some(accessRegex(date, ip, file, obsId, obsDate, host, thread)) =>
+          Access(date, ip, file, obsId.toLong, obsDate, host, thread.toLong)
+        case Some(accessRegex(date, file, obsId, obsDate, host, thread)) => 
+          Access(date, "", file, obsId.toLong, obsDate, host, thread.toLong)
+        case _ => Access("", "", "", 0, "", "", 0)
       }
     }
 
     def extractIp(line: String): IpThread = {
       ipRegex.findFirstIn(line) match {
-        case Some(ipRegex(ip, thread)) =>
-          new IpThread(thread.toInt, ip)
-      }
+        case Some(ipRegex(ip, thread)) => IpThread(ip, thread.toLong)
+        case _ => IpThread("", 0)
+      }  
     }
 
     def extractSize(line: String): SizeThread = {
       sizeRegex.findFirstIn(line) match {
-        case Some(sizeRegex(size, thread)) =>
-          new SizeThread(thread.toInt, size.toInt)
+        case Some(sizeRegex(size, thread)) => SizeThread(size.toLong, thread.toLong)
+        case _ => SizeThread(0, 0)
       }
     }
+
+  def extractIngest(line: String): Ingest = {
+    ingestRegex.findFirstIn(line) match { 
+      case Some(ingestRegex(date, ip, host, size, file, obsId, obsDate, thread)) =>
+        Ingest(date, ip, host, size.toLong, file, obsId.toLong, obsDate, thread.toLong)
+      case _ => Ingest("", "", "", 0, "", 0, "", 0)
+    }
+  }
+
 }
