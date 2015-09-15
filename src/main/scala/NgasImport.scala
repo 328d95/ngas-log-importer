@@ -26,25 +26,36 @@ object NgasImport {
 
   val ipRegex = """.*HTTP reply sent to: \(\'([^\']+).*Thread\-(\d+)""".r
 
-      case class Access(date: String, ip: String, file: String, obsId: Long, obsDate: String, host: String, thread: Long)
-      case class IpThread(ip: String, thread: Long)
-      case class SizeThread(size: Long, thread: Long)
-      case class Thread(thread: Long)
-      case class Ingest(date: String, ip: String, host: String, size: Long, file: String, obsId: Long, obsDate: String, thread: Long)
+    // parsing types
+    case class Access(date: String, ip: String, file: String, obsId: Long, obsDate: String, host: String, thread: Long)
+    case class IpThread(ip: String, thread: Long)
+    case class SizeThread(size: Long, thread: Long)
+    case class Thread(thread: Long)
+    case class Ingest(date: String, ip: String, host: String, size: Long, file: String, obsId: Long, obsDate: String, thread: Long)
+
+    val logFile = "file:///home/damien/project/ngaslogs-fe1/*.nglog"
+    val conf = new SparkConf()
+      .setMaster("local[12]")
+      .setAppName("NGAS Log Importer")
+    val sc = new SparkContext(conf)
+    val sqlContext = new SQLContext(sc)
+    import sqlContext.implicits._
 
     def main(args: Array[String]) = {
-      val logFile = "file:///home/damien/project/ngaslogs-fe1/*.nglog"
-      val conf = new SparkConf()
-        .setMaster("local[4]")
-        .setAppName("NGAS Log Importer")
-
-      val sc = new SparkContext(conf)
-
-      val sqlContext = new SQLContext(sc)
-      import sqlContext.implicits._
-
+      
       val lines = sc.textFile(logFile)
+        .filter(line => 
+          line.contains("path=|QARCHIVE|") ||
+          line.contains("path=|RETRIEVE?") ||
+          line.contains("Archive Push/Pull") ||
+          line.contains("HTTP reply sent to:") ||
+          line.contains("NGAMS_INFO_REDIRECT") || 
+          line.contains("Successfully handled Archive") ||
+          line.contains("Sending data back to requestor"))
+        .coalesce(25) //TODO make this numberoffilteredlines/totallines + 10% * numPartitions
+        .persist(StorageLevel.MEMORY_AND_DISK_SER)
 
+  
       val ingests = lines
         .filter(line => line.contains("path=|QARCHIVE|"))
         .map(line => extractIngest(line))
@@ -54,7 +65,6 @@ object NgasImport {
         .filter(line => line.contains("path=|RETRIEVE?"))
         .map(line => extractAccess(line))
         .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER)
 
       val archives = lines 
         .filter(line => line.contains("Archive Push/Pull"))
@@ -69,8 +79,12 @@ object NgasImport {
 
       // get redirect and internal call thread numbers
       val redirects = lines 
-        .filter(line => 
-          (line.contains("NGAMS_INFO_REDIRECT") || line.contains("Successfully handled Archive")))
+        .filter(line => line.contains("NGAMS_INFO_REDIRECT"))
+        .map(line => extractThread(line))
+        .toDF()
+
+      val successfulIngest = lines
+        .filter(line => line.contains("Successfully handled Archive"))
         .map(line => extractThread(line))
         .toDF()
 
@@ -88,14 +102,19 @@ object NgasImport {
         .join(dataReplys, accesses("thread") === dataReplys("thread"), "inner")
         .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
 
-      // TODO what else do I need to do to ensure ingests are correct?
+      // TODO is this correct?
       val ingestsClean = ingests
+        // remove failed matches
         .filter(ingests("thread") > 0)
+        // remove redirects
+        .join(redirects, ingests("thread") === redirects("thread"), "left_outer")
+        // ensure success 
+        .join(successfulIngest, ingests("thread") === successfulIngest("thread"), "inner")
         .saveToEs("ngas/ingest", Map("es.mapping.id" -> "date"))
 
       sc.stop()
     }
-    
+
     def extractThread(line: String): Thread = {
       threadRegex.findFirstIn(line) match {
         case Some(threadRegex(thread)) => Thread(thread.toLong)
