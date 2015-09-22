@@ -13,6 +13,9 @@ import org.apache.spark.sql.functions._
 import org.elasticsearch.spark._
 import org.elasticsearch.spark.sql._
 
+// mod date code
+import files.modFiles
+
 object NgasImport {
 
   val accessRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*file\_id=((\d+)\_(\d+)[^\|]+).*host=([^\s]+).*Thread\-(\d+)""".r    
@@ -33,7 +36,13 @@ object NgasImport {
     case class Thread(thread: Long)
     case class Ingest(date: String, ip: String, host: String, size: Long, file: String, obsId: Long, obsDate: String, thread: Long)
 
-    val logFile = "file:///home/damien/project/ngaslogs-fe1/*.nglog"
+    // args
+    val logDir = "/home/damien/project/ngaslogs-fe1"
+    val modDate = "1411353703"
+
+    // setup
+    val partitions = 30
+    val modFiles = new modFiles
     val conf = new SparkConf()
       .setMaster("local[12]")
       .setAppName("NGAS Log Importer")
@@ -43,18 +52,17 @@ object NgasImport {
 
     def main(args: Array[String]) = {
       
-      val lines = sc.textFile(logFile)
+      val lines = sc.textFile(modFiles.dirAfter(logDir, modDate))
         .filter(line => 
           line.contains("path=|QARCHIVE|") ||
           line.contains("path=|RETRIEVE?") ||
-          line.contains("Archive Push/Pull") ||
+          //line.contains("Archive Push/Pull") ||
           line.contains("HTTP reply sent to:") ||
           line.contains("NGAMS_INFO_REDIRECT") || 
           line.contains("Successfully handled Archive") ||
           line.contains("Sending data back to requestor"))
-        .coalesce(25) //TODO make this numberoffilteredlines/totallines + 10% * numPartitions
+        .coalesce(partitions)
         .persist(StorageLevel.MEMORY_AND_DISK_SER)
-
   
       val ingests = lines
         .filter(line => line.contains("path=|QARCHIVE|"))
@@ -66,12 +74,12 @@ object NgasImport {
         .map(line => extractAccess(line))
         .toDF()
 
-      val archives = lines 
-        .filter(line => line.contains("Archive Push/Pull"))
-        .map(line => extractSize(line))
-        .toDF()
+//      val archives = lines 
+//        .filter(line => line.contains("Archive Push/Pull"))
+//        .map(line => extractSize(line))
+//        .toDF()
 
-      // get access thread numbers
+      // get ingest ip addresses
       val httpReplys = lines
         .filter(line => line.contains("HTTP reply sent to:"))
         .map(line => extractIp(line))
@@ -83,7 +91,7 @@ object NgasImport {
         .map(line => extractThread(line))
         .toDF()
 
-      val successfulIngest = lines
+      val handledArchives = lines
         .filter(line => line.contains("Successfully handled Archive"))
         .map(line => extractThread(line))
         .toDF()
@@ -96,20 +104,15 @@ object NgasImport {
       val accessesClean = accesses
         // remove failed matches
         .filter(accesses("thread") > 0)
-        // remove redirects
         .join(redirects, accesses("thread") === redirects("thread"), "left_outer")
-        // ensure threads with success messages
         .join(dataReplys, accesses("thread") === dataReplys("thread"), "inner")
         .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
 
-      // TODO is this correct?
       val ingestsClean = ingests
         // remove failed matches
         .filter(ingests("thread") > 0)
-        // remove redirects
-        .join(redirects, ingests("thread") === redirects("thread"), "left_outer")
-        // ensure success 
-        .join(successfulIngest, ingests("thread") === successfulIngest("thread"), "inner")
+        .join(handledArchives, ingests("thread") === handledArchives("thread"), "inner")
+        .dropDuplicates(Seq("file"))
         .saveToEs("ngas/ingest", Map("es.mapping.id" -> "date"))
 
       sc.stop()
