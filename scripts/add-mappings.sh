@@ -24,9 +24,6 @@ curl -XPUT 'http://localhost:9200/ngas' -d '
         "size": {
            "type": "long"
         },
-        "thread": {
-           "type": "long"
-        },
         "file": {
           "type": "string",
           "index": "not_analyzed"
@@ -54,9 +51,6 @@ curl -XPUT 'http://localhost:9200/ngas' -d '
            "type": "long"
         },
         "size": {
-           "type": "long"
-        },
-        "thread": {
            "type": "long"
         },
         "file": {
