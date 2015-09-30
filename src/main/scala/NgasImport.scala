@@ -22,6 +22,9 @@ import org.apache.hadoop.io.Text
 import org.apache.hadoop.mapred.{FileSplit, TextInputFormat}
 import org.apache.spark.rdd.HadoopRDD
 
+// exceptions
+import scala.util.control.Exception._
+
 object NgasImport {
 
   val accessRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*file\_id=((\d+)\_(\d+)[^\|]+).*host=([^\s]+).*Thread\-(.*)""".r    
@@ -42,22 +45,22 @@ object NgasImport {
     case class Thread(thread: String)
     case class Ingest(date: String, ip: String, host: String, size: Long, file: String, obsId: Long, obsDate: String, thread: String)
 
-    // args
-    val logDir = "/home/damien/project/ngaslogs-fe1"
-    val modDate = "1411353703"
-
     // setup
     val partitions = 30
     val modFiles = new modFiles
     val conf = new SparkConf()
-      .setMaster("local[4]")
       .setAppName("NGAS Log Importer")
     val sc = new SparkContext(conf)
     val sqlContext = new SQLContext(sc)
     import sqlContext.implicits._
 
     def main(args: Array[String]) = {
+  
+      if (args.length == 0)
+        throw new IllegalArgumentException("The first argument must be the path to the log directory.")
+      val logDir = args(0)
 
+      /* Adapted from http://themodernlife.github.io/scala/spark/hadoop/hdfs/2014/09/28/spark-input-filename/ */
       // Create the text file
       val text = sc.hadoopFile(logDir, 
         classOf[TextInputFormat], classOf[LongWritable], classOf[Text], sc.defaultMinPartitions)
@@ -69,6 +72,7 @@ object NgasImport {
         val fileHash = modFiles.md5(inputSplit.asInstanceOf[FileSplit].getPath.toString)
         iterator.map(splitAndLine => splitAndLine._2+fileHash)
       }
+      /* End adaptation */
 
       val lines = linesRaw.filter(line => 
         line.contains("path=|QARCHIVE|") ||
@@ -78,7 +82,8 @@ object NgasImport {
         line.contains("Successfully handled Archive") ||
         line.contains("Sending data back to requestor"))
       //line.contains("Archive Push/Pull") ||
-      .persist(StorageLevel.MEMORY_AND_DISK_SER)
+      // persist because the filtered data set is only ~25% of the original
+      .persist(StorageLevel.MEMORY_AND_DISK_SER) 
   
       val ingests = lines
         .filter(line => line.contains("path=|QARCHIVE|"))
@@ -118,7 +123,7 @@ object NgasImport {
         .toDF()
 
       val accessesClean = accesses
-        .where(accesses("thread") !== "") // remove failed atches
+        .where(accesses("thread") !== "") // remove failed matches
         .join(redirects, accesses("thread") === redirects("thread"), "left_outer")
         .join(dataReplys, accesses("thread") === dataReplys("thread"), "inner")
         .select("date", "ip", "host", "size", "file", "obsId", "obsDate")
