@@ -50,26 +50,30 @@ object NgasImport {
     val modFiles = new modFiles
     val conf = new SparkConf()
       .setAppName("NGAS Log Importer")
+
     val sc = new SparkContext(conf)
     val sqlContext = new SQLContext(sc)
     import sqlContext.implicits._
 
     def main(args: Array[String]) = {
   
-      if (args.length == 0)
-        throw new IllegalArgumentException("The first argument must be the path to the log directory.")
-      val logDir = args(0)
+      val modDir = args.length match {
+        case 0 => throw new IllegalArgumentException("The first argument must be the path to the log directory.")
+        case 1 => modFiles.logFiles(args(0))
+        case 2 => modFiles.logFiles(args(0), args(1))
+      }
 
       /* Adapted from http://themodernlife.github.io/scala/spark/hadoop/hdfs/2014/09/28/spark-input-filename/ */
       // Create the text file
-      val text = sc.hadoopFile(logDir, 
-        classOf[TextInputFormat], classOf[LongWritable], classOf[Text], sc.defaultMinPartitions)
+      val text = 
+          sc.hadoopFile(modDir, classOf[TextInputFormat], classOf[LongWritable], classOf[Text], sc.defaultMinPartitions)
 
       // Cast to a HadoopRDD
       val hadoopRdd = text.asInstanceOf[HadoopRDD[LongWritable, Text]]
-      val linesRaw = hadoopRdd.mapPartitionsWithInputSplit { (inputSplit, iterator) ⇒
-        // get filename
+      val linesRaw = hadoopRdd.mapPartitionsWithInputSplit { (inputSplit, iterator) =>
+        // get file name from input split's file split object and hash it
         val fileHash = modFiles.md5(inputSplit.asInstanceOf[FileSplit].getPath.toString)
+        // iterate through lines in the input split and append the hash
         iterator.map(splitAndLine => splitAndLine._2+fileHash)
       }
       /* End adaptation */
