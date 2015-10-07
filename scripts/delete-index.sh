@@ -1,1 +1,1 @@
-curl -XDELETE localhost:9200/ngas
+curl -XDELETE http://localhost:9200/ngas

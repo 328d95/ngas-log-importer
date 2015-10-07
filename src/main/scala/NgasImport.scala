@@ -86,18 +86,19 @@ object NgasImport {
         line.contains("Successfully handled Archive") ||
         line.contains("Sending data back to requestor"))
       //line.contains("Archive Push/Pull") ||
-      // persist because the filtered data set is only ~25% of the original
-      .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+	// move persist further down--less memory
   
       val ingests = lines
         .filter(line => line.contains("path=|QARCHIVE|"))
         .map(line => extractIngest(line))
         .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
       val accesses = lines
         .filter(line => line.contains("path=|RETRIEVE?"))
         .map(line => extractAccess(line))
         .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
 //      val archives = lines 
 //        .filter(line => line.contains("Archive Push/Pull"))
@@ -115,16 +116,19 @@ object NgasImport {
         .filter(line => line.contains("NGAMS_INFO_REDIRECT"))
         .map(line => extractThread(line))
         .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
       val handledArchives = lines
         .filter(line => line.contains("Successfully handled Archive"))
         .map(line => extractThread(line))
         .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
       val dataReplys = lines
         .filter(line => line.contains("Sending data back to requestor"))
         .map(line => extractSize(line))
         .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
       val accessesClean = accesses
         .where(accesses("thread") !== "") // remove failed matches
