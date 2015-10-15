@@ -30,10 +30,6 @@ import scala.util.control.Exception._
 
 object NgasImport {
 
-
-  //val transferRateRegex = """.*\)\:\s(\d+\.\d+).*Transfer rate:(\d+\.\d+).*(?<=Thread-)(.*)""".r
-
-
     // setup
     val partitions = 30
     val modFiles = new ModFiles
@@ -82,65 +78,71 @@ object NgasImport {
  //       .map(line => logParser.extractTransfer(line))
  //       .toDF()
 
-      val hosts = lines
-        .filter(line => line.contains("Located suitable file for request"))
-        .map(line => logParser.extractHost(line))
-        .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
-
-      val redirects = lines 
-        .filter(line => line.contains("NGAMS_INFO_REDIRECT"))
-        .map(line => logParser.extractThread(line))
-        .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
-
-      val dataReplys = lines
-        .filter(line => line.contains("Sending data back to requestor"))
-        .map(line => logParser.extractSize(line))
-        .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
-
-      val accesses = lines
-        .filter(line => line.contains("path=|RETRIEVE?"))
-        .map(line => logParser.extractAccess(line))
-        .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
-
-      val accessesClean = accesses
-        .where(accesses("accessThread") !== "") // remove failed matches
-        .join(redirects, accesses("accessThread") === redirects("thread"), "left_outer")
-        .join(dataReplys, accesses("accessThread") === dataReplys("sizeThread"), "inner")
-        .select("date", "ip", "host", "size", "file", "obsId", "obsDate", "accessThread")
-        .persist(StorageLevel.MEMORY_AND_DISK_SER)
-
-      accesses.unpersist
-      redirects.unpersist
-      dataReplys.unpersist
-
-      val fullAccesses = accessesClean
-        .where(accessesClean("host") !== "")
-        .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
-
-      // add hosts then save
-      val hostlessAccesses = accessesClean
-        .where(accessesClean("host") === "")
-        .join(hosts, accessesClean("accessThread") === hosts("hostThread"), "left")
-        .select(
-          accessesClean("date"), accessesClean("ip"), hosts("host"), accessesClean("size"), 
-          accessesClean("file"), accessesClean("obsId"), accessesClean("obsDate"))
-        .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
+//      val hosts = lines
+//        .filter(line => line.contains("Located suitable file for request"))
+//        .map(line => logParser.extractHost(line))
+//        .toDF()
+//        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+//
+//      val redirects = lines 
+//        .filter(line => line.contains("NGAMS_INFO_REDIRECT"))
+//        .map(line => logParser.extractThread(line))
+//        .toDF()
+//        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+//
+//      val dataReplys = lines
+//        .filter(line => line.contains("Sending data back to requestor"))
+//        .map(line => logParser.extractSize(line))
+//        .toDF()
+//        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+//
+//      val accesses = lines
+//        .filter(line => line.contains("path=|RETRIEVE?"))
+//        .map(line => logParser.extractAccess(line))
+//        .toDF()
+//        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+//
+//      val accessesClean = accesses
+//        .where(accesses("accessThread") !== "") // remove failed matches
+//        .join(redirects, accesses("accessThread") === redirects("thread"), "left_outer")
+//        .join(dataReplys, accesses("accessThread") === dataReplys("sizeThread"), "inner")
+//        .select("date", "ip", "host", "size", "file", "obsId", "obsDate", "accessThread")
+//        .persist(StorageLevel.MEMORY_AND_DISK_SER)
+//
+//      accesses.unpersist
+//      redirects.unpersist
+//      dataReplys.unpersist
+//
+//      val fullAccesses = accessesClean
+//        .where(accessesClean("host") !== "")
+//        .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
+//
+//      // add hosts then save
+//      val hostlessAccesses = accessesClean
+//        .where(accessesClean("host") === "")
+//        .join(hosts, accessesClean("accessThread") === hosts("hostThread"), "left")
+//        .select(
+//          accessesClean("date"), accessesClean("ip"), hosts("host"), accessesClean("size"), 
+//          accessesClean("file"), accessesClean("obsId"), accessesClean("obsDate"))
+//        .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
 
       /////////////
       // INGESTS //
       /////////////
 
-      val handledArchives = lines
+      val ingestSizes = lines
+        .filter(line => line.contains("Archive Push/Pull"))
+        .map(line => logParser.extractSize(line))
+        .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+      val successfulIngests = lines
         .filter(line => line.contains("Successfully handled Archive"))
-        .map(line => logParser.extractThread(line))
+        .map(line => logParser.extractFile(line))
         .toDF()
         .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
-      val ips = lines
+      val ingestIps = lines
         .filter(line => line.contains("HTTP reply sent to:"))
         .map(line => logParser.extractIp(line))
         .toDF()
@@ -154,24 +156,27 @@ object NgasImport {
 
       val ingestsClean = ingests
         .where(ingests("ingestThread") !== "") // remove failed matches
-        .join(handledArchives, ingests("ingestThread") === handledArchives("thread"), "inner")
+        // keep only successful and get file data
+        .join(successfulIngests, ingests("ingestThread") === successfulIngests("fileThread"), "inner")
+        //get content size
+        .join(ingestSizes, ingests("ingestThread") === ingestSizes("sizeThread"), "left_outer")
         .dropDuplicates(Seq("file"))
-        .select("date", "ip", "host", "size", "file", "obsId", "obsDate", "thread")
         .persist(StorageLevel.MEMORY_AND_DISK_SER)
 
+
       ingests.unpersist 
-      handledArchives.unpersist
+      successfulIngests.unpersist
         
       val ingestsFull = ingestsClean
         .where(ingestsClean("ip") !== "")   
-        .select("date", "ip", "host", "size", "file", "obsId", "obsDate")
+        .select("date", "ip", "size", "file", "obsId", "obsDate")
         .saveToEs("ngas/ingest", Map("es.mapping.id" -> "date"))
 
       val iplessIngests = ingestsClean
         .where(ingestsClean("ip") === "")
-        .join(ips, ingestsClean("thread") === ips("ipThread"), "left")
+        .join(ingestIps, ingestsClean("fileThread") === ingestIps("ipThread"), "left")
         .select(//"date", "ip", "host", "size", "file", "obsId", "obsDate")
-          ingestsClean("date"), ips("ip"), ingestsClean("host"), ingestsClean("size"), 
+          ingestsClean("date"), ingestIps("ip"), ingestsClean("size"), 
           ingestsClean("file"), ingestsClean("obsId"), ingestsClean("obsDate"))
         .saveToEs("ngas/ingest", Map("es.mapping.id" -> "date"))
 

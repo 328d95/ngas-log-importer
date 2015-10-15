@@ -5,13 +5,14 @@ class LogParser {
   val accessRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*file\_id=((\d+)\_(\d+)[^\|]+).*host=([^\s]+).*Thread\-(.*)""".r    
   val accessNoHostRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*file\_id=((\d+)\_(\d+)[^\|]+).*Thread\-(.*)""".r    
 
-  val ingestRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*host=([^\s]+).*content-length=(\d+).*filename="((\d+)_(\d+)[^\"]+).*Thread\-(.*)""".r
-  val ingestNoIpRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*host=([^\s]+).*content-length=(\d+).*filename="((\d+)_(\d+)[^\"]+).*Thread\-(.*)""".r
+  val ingestRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*Thread\-(.*)""".r
+  val ingestNoIpRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*Thread\-(.*)""".r
 
   val threadRegex = """.*Thread\-(.*)""".r
   val hostRegex = """.*Host ID\/IP: ([^\/]*).*Thread\-(.*)""".r
-  val sizeRegex = """.*Size:\s(\d+).*Thread\-(.*)""".r
-  val ipRegex = """.*HTTP reply sent to: \(\'([^\']+).*Thread\-(\d+)""".r
+  val sizeRegex = """.*[sS]ize:\s(\d+).*Thread\-(.*)""".r
+  val ipRegex = """.*HTTP reply sent to: \(\'([^\']+).*Thread\-(.*)""".r
+  val fileRegex = """.*URI:\s((\d+)_(\d+)[^\s]+).*Thread\-(.*)""".r
 
   // parsing types
   // threads are named differently to deal with duplicate thread join issues
@@ -19,9 +20,18 @@ class LogParser {
   case class IpThread(ip: String, ipThread: String)
   case class SizeThread(size: Long, sizeThread: String)
   case class Thread(thread: String)
-  case class Ingest(date: String, ip: String, host: String, size: Long, file: String, obsId: Long, obsDate: String, ingestThread: String)
+  case class Ingest(date: String, ip: String, ingestThread: String)
   case class Host(host: String, hostThread: String)
+  case class File(file: String, obsId: Long, obsDate: String, fileThread: String)
 //    case class Transfer(time: Float, rate: Float, thread: String)
+
+  def extractFile(line: String): File = {
+    line match {
+      case fileRegex(file, obsId, obsDate, thread) =>
+        File(file, obsId.toLong, obsDate, thread)
+      case _ => File("", 0, "", "")
+    }
+  }
 
   def extractThread(line: String): Thread = {
     line match {
@@ -71,11 +81,11 @@ class LogParser {
 
   def extractIngest(line: String): Ingest = {
     line match { 
-      case ingestRegex(date, ip, host, size, file, obsId, obsDate, thread) =>
-        Ingest(date, ip, host, size.toLong, file, obsId.toLong, obsDate, thread)
-      case ingestNoIpRegex(date, host, size, file, obsId, obsDate, thread) =>
-        Ingest(date, "", host, size.toLong, file, obsId.toLong, obsDate, thread)
-      case _ => Ingest("", "", "", 0, "", 0, "", "")
+      case ingestRegex(date, ip, thread) =>
+        Ingest(date, ip, thread)
+      case ingestNoIpRegex(date, thread) =>
+        Ingest(date, "", thread)
+      case _ => Ingest("", "", "")
     }
   }
 }
