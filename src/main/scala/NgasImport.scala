@@ -78,53 +78,53 @@ object NgasImport {
  //       .map(line => logParser.extractTransfer(line))
  //       .toDF()
 
-//      val hosts = lines
-//        .filter(line => line.contains("Located suitable file for request"))
-//        .map(line => logParser.extractHost(line))
-//        .toDF()
-//        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
-//
-//      val redirects = lines 
-//        .filter(line => line.contains("NGAMS_INFO_REDIRECT"))
-//        .map(line => logParser.extractThread(line))
-//        .toDF()
-//        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
-//
-//      val dataReplys = lines
-//        .filter(line => line.contains("Sending data back to requestor"))
-//        .map(line => logParser.extractSize(line))
-//        .toDF()
-//        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
-//
-//      val accesses = lines
-//        .filter(line => line.contains("path=|RETRIEVE?"))
-//        .map(line => logParser.extractAccess(line))
-//        .toDF()
-//        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
-//
-//      val accessesClean = accesses
-//        .where(accesses("accessThread") !== "") // remove failed matches
-//        .join(redirects, accesses("accessThread") === redirects("thread"), "left_outer")
-//        .join(dataReplys, accesses("accessThread") === dataReplys("sizeThread"), "inner")
-//        .select("date", "ip", "host", "size", "file", "obsId", "obsDate", "accessThread")
-//        .persist(StorageLevel.MEMORY_AND_DISK_SER)
-//
-//      accesses.unpersist
-//      redirects.unpersist
-//      dataReplys.unpersist
-//
-//      val fullAccesses = accessesClean
-//        .where(accessesClean("host") !== "")
-//        .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
-//
-//      // add hosts then save
-//      val hostlessAccesses = accessesClean
-//        .where(accessesClean("host") === "")
-//        .join(hosts, accessesClean("accessThread") === hosts("hostThread"), "left")
-//        .select(
-//          accessesClean("date"), accessesClean("ip"), hosts("host"), accessesClean("size"), 
-//          accessesClean("file"), accessesClean("obsId"), accessesClean("obsDate"))
-//        .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
+      val hosts = lines
+        .filter(line => line.contains("Located suitable file for request"))
+        .map(line => logParser.extractHost(line))
+        .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+
+      val redirects = lines 
+        .filter(line => line.contains("NGAMS_INFO_REDIRECT"))
+        .map(line => logParser.extractThread(line))
+        .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+
+      val dataReplys = lines
+        .filter(line => line.contains("Sending data back to requestor"))
+        .map(line => logParser.extractSize(line))
+        .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+
+      val accesses = lines
+        .filter(line => line.contains("path=|RETRIEVE?"))
+        .map(line => logParser.extractAccess(line))
+        .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+
+      val accessesClean = accesses
+        .where(accesses("accessThread") !== "") // remove failed matches
+        .join(redirects, accesses("accessThread") === redirects("thread"), "left_outer")
+        .join(dataReplys, accesses("accessThread") === dataReplys("sizeThread"), "inner")
+        .select("date", "ip", "host", "size", "file", "obsId", "obsDate", "accessThread")
+        .persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+      accesses.unpersist
+      redirects.unpersist
+      dataReplys.unpersist
+
+      val fullAccesses = accessesClean
+        .where(accessesClean("host") !== "")
+        .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
+
+      // add hosts then save
+      val hostlessAccesses = accessesClean
+        .where(accessesClean("host") === "")
+        .join(hosts, accessesClean("accessThread") === hosts("hostThread"), "left")
+        .select(
+          accessesClean("date"), accessesClean("ip"), hosts("host"), accessesClean("size"), 
+          accessesClean("file"), accessesClean("obsId"), accessesClean("obsDate"))
+        .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
 
       /////////////
       // INGESTS //
