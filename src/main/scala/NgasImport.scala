@@ -14,7 +14,10 @@ import org.elasticsearch.spark._
 import org.elasticsearch.spark.sql._
 
 // mod date code
-import files.modFiles
+import files.ModFiles
+
+// parser
+import parser.LogParser
 
 // hadoopRDD
 import org.apache.hadoop.io.LongWritable
@@ -27,29 +30,15 @@ import scala.util.control.Exception._
 
 object NgasImport {
 
-  val accessRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*file\_id=((\d+)\_(\d+)[^\|]+).*host=([^\s]+).*Thread\-(.*)""".r    
 
-  val threadRegex = """.*Thread\-(.*)""".r
-  val sizeRegex = """.*Size:\s(\d+).*Thread\-(.*)""".r
-  val ingestRegex = """^(\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}:\d{2}\.\d{3}).*client_address=\(\'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*host=([^\s]+).*content-length=(\d+).*filename="((\d+)_(\d+)[^\"]+).*Thread\-(.*)""".r
+  //val transferRateRegex = """.*\)\:\s(\d+\.\d+).*Transfer rate:(\d+\.\d+).*(?<=Thread-)(.*)""".r
 
-  // Want to know the transfer rate of in-progress transfers and for which thread.
- // val transferRateRegex = """(?<=Transfer rate:)(\d+\.\d[MGKBmgkb]{2}\/s).*(?<=Thread-)(\d+)""".r
-
-  val ipRegex = """.*HTTP reply sent to: \(\'([^\']+).*Thread\-(\d+)""".r
-
-    // parsing types
-    case class Access(date: String, ip: String, file: String, obsId: Long, obsDate: String, host: String, thread: String)
-    case class IpThread(ip: String, thread: String)
-    case class SizeThread(size: Long, thread: String)
-    case class Thread(thread: String)
-    case class Ingest(date: String, ip: String, host: String, size: Long, file: String, obsId: Long, obsDate: String, thread: String)
 
     // setup
     val partitions = 30
-    val modFiles = new modFiles
-    val conf = new SparkConf()
-      .setAppName("NGAS Log Importer")
+    val modFiles = new ModFiles
+    val logParser = new LogParser
+    val conf = new SparkConf().setAppName("NGAS Log Importer")
 
     val sc = new SparkContext(conf)
     val sqlContext = new SQLContext(sc)
@@ -70,120 +59,124 @@ object NgasImport {
 
       // Cast to a HadoopRDD
       val hadoopRdd = text.asInstanceOf[HadoopRDD[LongWritable, Text]]
-      val linesRaw = hadoopRdd.mapPartitionsWithInputSplit { (inputSplit, iterator) =>
+      val lines = hadoopRdd.mapPartitionsWithInputSplit { (inputSplit, iterator) =>
         // get file name from input split's file split object and hash it
-        val fileHash = modFiles.md5(inputSplit.asInstanceOf[FileSplit].getPath.toString)
+
+        val fileHash = inputSplit.asInstanceOf[FileSplit].getPath.toString.hashCode.toString
+
         // iterate through lines in the input split and append the hash
-        iterator.map(splitAndLine => splitAndLine._2+fileHash)
+        iterator
+          .filter(splitAndLine => (splitAndLine._2.toString).contains("[INFO]"))
+          .filter(splitAndLine => (splitAndLine._2.toString).contains("Thread-")) // get rid of janitor threads
+          .map(splitAndLine => splitAndLine._2+fileHash)
       }
+
       /* End adaptation */
 
-      val lines = linesRaw.filter(line => 
-        line.contains("path=|QARCHIVE|") ||
-        line.contains("path=|RETRIEVE?") ||
-        line.contains("HTTP reply sent to:") ||
-        line.contains("NGAMS_INFO_REDIRECT") || 
-        line.contains("Successfully handled Archive") ||
-        line.contains("Sending data back to requestor"))
-      //line.contains("Archive Push/Pull") ||
-	// move persist further down--less memory
-  
-      val ingests = lines
-        .filter(line => line.contains("path=|QARCHIVE|"))
-        .map(line => extractIngest(line))
+      //////////////
+      // ACCESSES //
+      //////////////
+
+ //     val transferRate = lines
+ //       .filter(line => line.contains("Total time for handling request"))
+ //       .map(line => logParser.extractTransfer(line))
+ //       .toDF()
+
+      val hosts = lines
+        .filter(line => line.contains("Located suitable file for request"))
+        .map(line => logParser.extractHost(line))
         .toDF()
         .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
-      val accesses = lines
-        .filter(line => line.contains("path=|RETRIEVE?"))
-        .map(line => extractAccess(line))
-        .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
-
-//      val archives = lines 
-//        .filter(line => line.contains("Archive Push/Pull"))
-//        .map(line => extractSize(line))
-//        .toDF()
-
-      // get ingest ip addresses
-      val httpReplys = lines
-        .filter(line => line.contains("HTTP reply sent to:"))
-        .map(line => extractIp(line))
-        .toDF()
-
-      // get redirect and internal call thread numbers
       val redirects = lines 
         .filter(line => line.contains("NGAMS_INFO_REDIRECT"))
-        .map(line => extractThread(line))
-        .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
-
-      val handledArchives = lines
-        .filter(line => line.contains("Successfully handled Archive"))
-        .map(line => extractThread(line))
+        .map(line => logParser.extractThread(line))
         .toDF()
         .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
       val dataReplys = lines
         .filter(line => line.contains("Sending data back to requestor"))
-        .map(line => extractSize(line))
+        .map(line => logParser.extractSize(line))
+        .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+
+      val accesses = lines
+        .filter(line => line.contains("path=|RETRIEVE?"))
+        .map(line => logParser.extractAccess(line))
         .toDF()
         .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
       val accessesClean = accesses
-        .where(accesses("thread") !== "") // remove failed matches
-        .join(redirects, accesses("thread") === redirects("thread"), "left_outer")
-        .join(dataReplys, accesses("thread") === dataReplys("thread"), "inner")
-        .select("date", "ip", "host", "size", "file", "obsId", "obsDate")
+        .where(accesses("accessThread") !== "") // remove failed matches
+        .join(redirects, accesses("accessThread") === redirects("thread"), "left_outer")
+        .join(dataReplys, accesses("accessThread") === dataReplys("sizeThread"), "inner")
+        .select("date", "ip", "host", "size", "file", "obsId", "obsDate", "accessThread")
+        .persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+      accesses.unpersist
+      redirects.unpersist
+      dataReplys.unpersist
+
+      val fullAccesses = accessesClean
+        .where(accessesClean("host") !== "")
         .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
 
+      // add hosts then save
+      val hostlessAccesses = accessesClean
+        .where(accessesClean("host") === "")
+        .join(hosts, accessesClean("accessThread") === hosts("hostThread"), "left")
+        .select(
+          accessesClean("date"), accessesClean("ip"), hosts("host"), accessesClean("size"), 
+          accessesClean("file"), accessesClean("obsId"), accessesClean("obsDate"))
+        .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
+
+      /////////////
+      // INGESTS //
+      /////////////
+
+      val handledArchives = lines
+        .filter(line => line.contains("Successfully handled Archive"))
+        .map(line => logParser.extractThread(line))
+        .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+
+      val ips = lines
+        .filter(line => line.contains("HTTP reply sent to:"))
+        .map(line => logParser.extractIp(line))
+        .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+
+      val ingests = lines
+        .filter(line => line.contains("path=|QARCHIVE|"))
+        .map(line => logParser.extractIngest(line))
+        .toDF()
+        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+
       val ingestsClean = ingests
-        .where(ingests("thread") !== "") // remove failed matches
-        .join(handledArchives, ingests("thread") === handledArchives("thread"), "inner")
+        .where(ingests("ingestThread") !== "") // remove failed matches
+        .join(handledArchives, ingests("ingestThread") === handledArchives("thread"), "inner")
         .dropDuplicates(Seq("file"))
+        .select("date", "ip", "host", "size", "file", "obsId", "obsDate", "thread")
+        .persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+      ingests.unpersist 
+      handledArchives.unpersist
+        
+      val ingestsFull = ingestsClean
+        .where(ingestsClean("ip") !== "")   
         .select("date", "ip", "host", "size", "file", "obsId", "obsDate")
+        .saveToEs("ngas/ingest", Map("es.mapping.id" -> "date"))
+
+      val iplessIngests = ingestsClean
+        .where(ingestsClean("ip") === "")
+        .join(ips, ingestsClean("thread") === ips("ipThread"), "left")
+        .select(//"date", "ip", "host", "size", "file", "obsId", "obsDate")
+          ingestsClean("date"), ips("ip"), ingestsClean("host"), ingestsClean("size"), 
+          ingestsClean("file"), ingestsClean("obsId"), ingestsClean("obsDate"))
         .saveToEs("ngas/ingest", Map("es.mapping.id" -> "date"))
 
       sc.stop()
     }
 
-    def extractThread(line: String): Thread = {
-      threadRegex.findFirstIn(line) match {
-        case Some(threadRegex(thread)) => Thread(thread)
-        case _ => Thread("")
-      }
-    }
-
-    def extractAccess(line: String): Access = {
-      accessRegex.findFirstIn(line) match {
-        case Some(accessRegex(date, ip, file, obsId, obsDate, host, thread)) =>
-          Access(date, ip, file, obsId.toLong, obsDate, host, thread)
-        case Some(accessRegex(date, file, obsId, obsDate, host, thread)) => 
-          Access(date, "", file, obsId.toLong, obsDate, host, thread)
-        case _ => Access("", "", "", 0, "", "", "")
-      }
-    }
-
-    def extractIp(line: String): IpThread = {
-      ipRegex.findFirstIn(line) match {
-        case Some(ipRegex(ip, thread)) => IpThread(ip, thread)
-        case _ => IpThread("", "")
-      }  
-    }
-
-    def extractSize(line: String): SizeThread = {
-      sizeRegex.findFirstIn(line) match {
-        case Some(sizeRegex(size, thread)) => SizeThread(size.toLong, thread)
-        case _ => SizeThread(0, "")
-      }
-    }
-
-  def extractIngest(line: String): Ingest = {
-    ingestRegex.findFirstIn(line) match { 
-      case Some(ingestRegex(date, ip, host, size, file, obsId, obsDate, thread)) =>
-        Ingest(date, ip, host, size.toLong, file, obsId.toLong, obsDate, thread)
-      case _ => Ingest("", "", "", 0, "", 0, "", "")
-    }
-  }
 
 }

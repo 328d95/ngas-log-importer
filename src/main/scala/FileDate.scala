@@ -2,7 +2,7 @@ package files
 import java.io.File
 import java.security.MessageDigest
 
-class modFiles {
+class ModFiles {
 
     /* Recursive list of files http://stackoverflow.com/questions/2637643/how-do-i-list-all-files-in-a-subdirectory-in-scala */
     def recursiveListFiles(f: File): Array[File] = {
@@ -22,9 +22,5 @@ class modFiles {
         .map(_.getAbsolutePath)
         // create "filename, filename" string for spark ingest
         .mkString(",")
-    }
-
-    def md5(file: String) = {
-      MessageDigest.getInstance("MD5").digest(file.getBytes).toString
     }
 }

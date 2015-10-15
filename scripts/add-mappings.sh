@@ -22,7 +22,7 @@ curl -XPUT 'http://localhost:9200/ngas' -d '
            "type": "long"
         },
         "size": {
-           "type": "long"
+           "type": "double"
         },
         "file": {
           "type": "string",
@@ -51,7 +51,7 @@ curl -XPUT 'http://localhost:9200/ngas' -d '
            "type": "long"
         },
         "size": {
-           "type": "long"
+           "type": "double"
         },
         "file": {
           "type": "string",
