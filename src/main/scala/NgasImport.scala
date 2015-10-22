@@ -55,15 +55,16 @@ object NgasImport {
 
       // Cast to a HadoopRDD
       val hadoopRdd = text.asInstanceOf[HadoopRDD[LongWritable, Text]]
-      val lines = hadoopRdd.mapPartitionsWithInputSplit { (inputSplit, iterator) =>
+      val linesRaw = hadoopRdd.mapPartitionsWithInputSplit { (inputSplit, iterator) =>
         // get file name from input split's file split object and hash it
 
         val fileHash = inputSplit.asInstanceOf[FileSplit].getPath.toString.hashCode.toString
 
         // iterate through lines in the input split and append the hash
         iterator
-          .filter(splitAndLine => (splitAndLine._2.toString).contains("[INFO]"))
-          .filter(splitAndLine => (splitAndLine._2.toString).contains("Thread-")) // get rid of janitor threads
+          .filter(splitAndLine => 
+            (splitAndLine._2.toString).contains("[INFO]") &&
+            (splitAndLine._2.toString).contains("Thread-"))
           .map(splitAndLine => splitAndLine._2+fileHash)
       }
 
@@ -73,34 +74,40 @@ object NgasImport {
       // ACCESSES //
       //////////////
 
+      val linesAccesses = linesRaw.filter(line =>
+        line.contains("NGAMS_INFO_REDIRECT") || 
+        line.contains("path=|RETRIEVE?") ||
+        line.contains("Sending data back to requestor") ||
+        line.contains("Located suitable file for request"))
+        .persist(StorageLevel.MEMORY_AND_DISK_SER)
+        
+
  //     val transferRate = lines
  //       .filter(line => line.contains("Total time for handling request"))
  //       .map(line => logParser.extractTransfer(line))
  //       .toDF()
 
-      val hosts = lines
+      val hosts = linesAccesses
         .filter(line => line.contains("Located suitable file for request"))
         .map(line => logParser.extractHost(line))
         .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
-      val redirects = lines 
+      val redirects = linesAccesses 
         .filter(line => line.contains("NGAMS_INFO_REDIRECT"))
         .map(line => logParser.extractThread(line))
         .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
-      val dataReplys = lines
+      val dataReplys = linesAccesses
         .filter(line => line.contains("Sending data back to requestor"))
         .map(line => logParser.extractSize(line))
         .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
-      val accesses = lines
+      val accesses = linesAccesses
         .filter(line => line.contains("path=|RETRIEVE?"))
         .map(line => logParser.extractAccess(line))
         .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+
+      linesAccesses.unpersist(false)
 
       val accessesClean = accesses
         .where(accesses("accessThread") !== "") // remove failed matches
@@ -108,10 +115,6 @@ object NgasImport {
         .join(dataReplys, accesses("accessThread") === dataReplys("sizeThread"), "inner")
         .select("date", "ip", "host", "size", "file", "obsId", "obsDate", "accessThread")
         .persist(StorageLevel.MEMORY_AND_DISK_SER)
-
-      accesses.unpersist
-      redirects.unpersist
-      dataReplys.unpersist
 
       val fullAccesses = accessesClean
         .where(accessesClean("host") !== "")
@@ -130,29 +133,34 @@ object NgasImport {
       // INGESTS //
       /////////////
 
-      val ingestSizes = lines
+      val linesIngests = linesRaw.filter(line =>
+        line.contains("path=|QARCHIVE|") ||
+        line.contains("Archive Push/Pull") ||
+        line.contains("HTTP reply sent to:") ||
+        line.contains("Successfully handled Archive"))
+        .persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+      val ingestSizes = linesIngests
         .filter(line => line.contains("Archive Push/Pull"))
         .map(line => logParser.extractSize(line))
         .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER)
 
-      val successfulIngests = lines
+      val successfulIngests = linesIngests
         .filter(line => line.contains("Successfully handled Archive"))
         .map(line => logParser.extractFile(line))
         .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
-      val ingestIps = lines
+      val ingestIps = linesIngests
         .filter(line => line.contains("HTTP reply sent to:"))
         .map(line => logParser.extractIp(line))
         .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
 
-      val ingests = lines
+      val ingests = linesIngests
         .filter(line => line.contains("path=|QARCHIVE|"))
         .map(line => logParser.extractIngest(line))
         .toDF()
-        .persist(StorageLevel.MEMORY_AND_DISK_SER) 
+
+     linesIngests.unpersist(false)
 
       val ingestsClean = ingests
         .where(ingests("ingestThread") !== "") // remove failed matches
@@ -163,10 +171,6 @@ object NgasImport {
         .dropDuplicates(Seq("file"))
         .persist(StorageLevel.MEMORY_AND_DISK_SER)
 
-
-      ingests.unpersist 
-      successfulIngests.unpersist
-        
       val ingestsFull = ingestsClean
         .where(ingestsClean("ip") !== "")   
         .select("date", "ip", "size", "file", "obsId", "obsDate")
