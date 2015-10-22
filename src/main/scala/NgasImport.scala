@@ -107,8 +107,6 @@ object NgasImport {
         .map(line => logParser.extractAccess(line))
         .toDF()
 
-      linesAccesses.unpersist(false)
-
       val accessesClean = accesses
         .where(accesses("accessThread") !== "") // remove failed matches
         .join(redirects, accesses("accessThread") === redirects("thread"), "left_outer")
@@ -128,6 +126,8 @@ object NgasImport {
           accessesClean("date"), accessesClean("ip"), hosts("host"), accessesClean("size"), 
           accessesClean("file"), accessesClean("obsId"), accessesClean("obsDate"))
         .saveToEs("ngas/access", Map("es.mapping.id" -> "date"))
+
+      linesAccesses.unpersist(false)
 
       /////////////
       // INGESTS //
@@ -160,8 +160,6 @@ object NgasImport {
         .map(line => logParser.extractIngest(line))
         .toDF()
 
-     linesIngests.unpersist(false)
-
       val ingestsClean = ingests
         .where(ingests("ingestThread") !== "") // remove failed matches
         // keep only successful and get file data
@@ -183,6 +181,8 @@ object NgasImport {
           ingestsClean("date"), ingestIps("ip"), ingestsClean("size"), 
           ingestsClean("file"), ingestsClean("obsId"), ingestsClean("obsDate"))
         .saveToEs("ngas/ingest", Map("es.mapping.id" -> "date"))
+
+      linesIngests.unpersist(false)
 
       sc.stop()
     }
